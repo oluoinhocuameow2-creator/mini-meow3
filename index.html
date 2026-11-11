@@ -5361,6 +5361,14 @@ function startMeowBalanceSync() {
       const wallet = snap.val() || { balance: 0 };
       currentCustomer = { ...currentCustomer, id: String(id), _meowWallet: wallet };
       renderMeowBalance(wallet);
+      // Cập nhật số dư trong trang cá nhân ngay tại snapshot ví đầu tiên và mọi thay đổi tiếp theo.
+      const profileRoot=document.getElementById("meowProfileContent");
+      if(profileRoot){
+        const balanceNode=profileRoot.querySelector(".meowProfileStat:first-child strong");
+        if(balanceNode)balanceNode.textContent=meowFormatMoney(wallet.balance||0,"0đ");
+      }
+      const profileBalanceNodes=document.querySelectorAll("[data-meow-profile-balance]");
+      profileBalanceNodes.forEach(node=>node.textContent=meowFormatMoney(wallet.balance||0,"0đ"));
     }, error => console.error("Không thể đồng bộ số dư Meow Wallet:", error));
     if (meowPurchaseListenerStartedFor !== String(id)) {
       meowPurchaseListenerStartedFor = String(id);
@@ -5634,6 +5642,12 @@ function meowStartCustomerLiveSync(customerId){
     const fresh=snap.val()||{};
     const previousCustomer=currentCustomer||{};
     currentCustomer={...previousCustomer,...fresh,id};
+    // Đồng bộ tên/ID trực tiếp lên các vùng hồ sơ đang mở.
+    const profileName=document.querySelector("#meowProfileContent .meowProfileName");
+    if(profileName)profileName.textContent=String(currentCustomer.name||currentCustomer.displayName||id);
+    const profileId=document.getElementById("meowProfileIdText");if(profileId)profileId.textContent=id;
+    const topName=document.getElementById("meowCustomerDisplayName");if(topName)topName.textContent=String(currentCustomer.name||currentCustomer.displayName||id);
+    const topId=document.getElementById("meowCustomerDisplayId");if(topId)topId.textContent=id;
     // Skip expensive story redraw when only balance/profile changes.
     const grantView=(obj)=>JSON.stringify(Object.fromEntries(Object.entries(obj||{}).filter(([key])=>/vip|grant|access|purchas|unlock|chapter|fullbook|fullBook|owned|permission/i.test(key))));
     const grantsChanged=grantView(previousCustomer)!==grantView(currentCustomer);
@@ -5761,7 +5775,7 @@ async function meowCreateGoogleCustomer(email,googleUser){
 }
 async function meowCompleteGoogleLogin(customer){
   const id=String(customer.id||""),data=customer.data||{};
-  currentCustomer={id,...data};
+  currentCustomer={...data,id};
   if(typeof meowChatStartUnreadWatch==='function')meowChatStartUnreadWatch();
   meowStartStaffRoleSync(id); // Admin/Owner VIP bypass also applies to Google login.
   meowWriteLoginGuard({attempts:0,lockedUntil:0});
@@ -5819,18 +5833,25 @@ async function meowGoogleLogin(){
 }
 document.getElementById("meowGoogleLoginBtn")?.addEventListener("click",meowGoogleLogin);
 
+function normalizeMeowLoginEmail(value){
+  const v=String(value||"").trim().toLowerCase();
+  if(!v.endsWith("@gmail.com")) return v;
+  return v.split("@")[0].split("+")[0].replace(/\./g,"")+"@gmail.com";
+}
+
 async function loginCustomer(){
   const msg = document.getElementById("readerLoginMsg");
   if (meowCheckLoginLock()) return;
 
-  const id = document.getElementById("readerCustomerID").value.trim();
+  let id = document.getElementById("readerCustomerID").value.trim();
   const identity = String(document.getElementById("readerCustomerIdentity")?.value || "").trim();
   if (!identity) {
     msg.innerText = "⚠️ Vui lòng nhập tên hoặc Gmail đã đăng ký.";
     return;
   }
-  if (!id) {
-    msg.innerText = "⚠️ Vui lòng nhập ID khách.";
+  const isEmailIdentity = identity.includes("@");
+  if (!id && !isEmailIdentity) {
+    msg.innerText = "⚠️ Nhập ID khách hoặc Gmail đã liên kết nha.";
     return;
   }
 
@@ -5839,17 +5860,24 @@ async function loginCustomer(){
   if (loginBtn) loginBtn.disabled = true;
 
   try {
-    const snap = await get(ref(db, "customers/" + id));
-    if (!snap.exists()) {
+    let data = null;
+    if (id) {
+      const snap = await get(ref(db, "customers/" + id));
+      if (snap.exists()) data = snap.val() || {};
+    }
+    // Gmail là khóa tra cứu bền vững khi người dùng đã đổi ID.
+    if ((!data || (isEmailIdentity && normalizeMeowLoginEmail(identity) !== normalizeMeowLoginEmail(data.email || data.gmail || ""))) && isEmailIdentity) {
+      const byEmail = await meowFindCustomerByGoogleEmail(identity);
+      if (byEmail) { id = String(byEmail.id); data = byEmail.data || {}; }
+    }
+    if (!data) {
       const result = meowRecordWrongLogin();
       msg.innerText = result.message;
       return;
     }
-    const data = snap.val() || {};
     const normalizeName = value => String(value || "").trim().normalize("NFKC").toLocaleLowerCase("vi").replace(/\s+/g," ");
-    const normalizeGmail = value => { const v=String(value||"").trim().toLowerCase(); if(!v.endsWith("@gmail.com")) return v; return v.split("@")[0].split("+")[0].replace(/\./g,"")+"@gmail.com"; };
-    const suppliedEmail = normalizeGmail(identity);
-    const storedEmail = normalizeGmail(data.email || data.gmail || "");
+    const suppliedEmail = normalizeMeowLoginEmail(identity);
+    const storedEmail = normalizeMeowLoginEmail(data.email || data.gmail || "");
     const suppliedName = normalizeName(identity);
     const storedNames = [data.name,data.displayName,data.username,data.nickname,data.customerName,data.tenKhach].map(normalizeName).filter(Boolean);
     const identityMatches = suppliedEmail.includes("@") ? (!!storedEmail && suppliedEmail === storedEmail) : storedNames.includes(suppliedName);
@@ -5861,7 +5889,7 @@ async function loginCustomer(){
 
     // ID và tên/Gmail cùng khớp thì xóa bộ đếm sai.
     meowWriteLoginGuard({ attempts: 0, lockedUntil: 0 });
-    currentCustomer = { id, ...data };
+    currentCustomer = { ...data, id };
     if(typeof meowChatStartUnreadWatch==='function')meowChatStartUnreadWatch();
     meowStartStaffRoleSync(id);
     meowStartCustomerLiveSync(id);
@@ -5871,6 +5899,7 @@ async function loginCustomer(){
     await meowLoadFollowedStories(id);
     await meowLoadReadingHistory(id);
     localStorage.setItem("MEOW_READER_ID", id);
+    const idField=document.getElementById("readerCustomerID");if(idField)idField.value=id;
 
     meowSaveRememberedLogin(identity,id);
     msg.innerText = "💖 Đăng nhập thành công";
@@ -9297,9 +9326,9 @@ async function restoreLogin(){
 
     currentCustomer = {
 
-      id:savedID,
+      ...snap.val(),
 
-      ...snap.val()
+      id:savedID
 
     };
     if(typeof meowChatStartUnreadWatch==='function')meowChatStartUnreadWatch();
@@ -9916,19 +9945,19 @@ async function meowEditProfileIdentity(){
  const oldEmail=String(customer.email||customer.gmail||'').trim().toLowerCase();
  // Tài khoản đăng nhập bằng Google chỉ được đổi tên hiển thị; ID và Gmail gắn cố định.
  const isGoogleAccount=String(customer.authProvider||'').toLowerCase()==='google'||!!customer.googleUid||String(customer.registeredFrom||'').toLowerCase().includes('google');
- const idLocked=isGoogleAccount||!!oldEmail;
+ const idLocked=isGoogleAccount;
  const overlay=document.createElement('div');overlay.className='meowIdentityOverlay';
  overlay.innerHTML=`<section class="meowIdentityPanel" role="dialog" aria-modal="true" aria-labelledby="meowIdentityTitle">
   <button type="button" class="meowIdentityClose" aria-label="Đóng">×</button>
   <div class="meowIdentityIcon">🐱💗</div><h3 id="meowIdentityTitle">Đổi thông tin cá nhân</h3>
-  <p>${isGoogleAccount?'Tài khoản Google chỉ được đổi tên hiển thị. Gmail và ID được cố định. Bạn có thể đổi tên bất cứ lúc nào.':oldEmail?'Tài khoản thường đã liên kết Gmail: có thể đổi tên, nhưng ID được cố định.':'Tài khoản thường chưa liên kết Gmail: có thể đổi tên và ID bất cứ lúc nào. Khi bổ sung Gmail, ID sẽ được cố định. Gmail đã liên kết không thể thay đổi.'}</p>
+  <p>${isGoogleAccount?'Tài khoản Google giữ nguyên ID và Gmail; bạn vẫn có thể đổi tên hiển thị.':oldEmail?'Có thể đổi tên và ID; Gmail đã liên kết được giữ nguyên để bảo vệ tài khoản.':'Có thể đổi tên, đổi ID và bổ sung Gmail. Sau khi liên kết, Gmail được giữ nguyên nhưng ID vẫn có thể đổi.'}</p>
   <label>Tên hiển thị<input id="meowIdentityName" maxlength="45" value="${escapeHTML(oldName)}" ></label>
   <label>${isGoogleAccount?'ID tài khoản':'ID mới'}<input id="meowIdentityId" maxlength="60" value="${escapeHTML(oldId)}" autocomplete="off" ${idLocked?'disabled':''}></label>
-  <small>${isGoogleAccount?'🔒 ID Google được giữ cố định.':oldEmail?'🔒 ID đã cố định vì tài khoản đã liên kết Gmail.':'ID mới dùng 4–60 ký tự: chữ, số, dấu gạch dưới hoặc dấu gạch ngang. Có thể đổi bất cứ lúc nào khi chưa liên kết Gmail.'}</small>
+  <small>${isGoogleAccount?'🔒 ID Google được giữ cố định.':'ID mới dùng 4–60 ký tự: chữ, số, dấu gạch dưới hoặc dấu gạch ngang.'}</small>
   <label>Gmail
    <input id="meowIdentityEmail" type="email" maxlength="160" value="${escapeHTML(oldEmail)}" placeholder="${oldEmail?'':'Nhập Gmail để bổ sung'}" ${isGoogleAccount||oldEmail?'disabled':''} autocomplete="email">
   </label>
-  <small>${isGoogleAccount?'🔒 Gmail Google đã liên kết và không thể thay đổi.':oldEmail?'🔒 Gmail đã liên kết không thể thay đổi.':'Chưa có Gmail thì có thể nhập để bổ sung. Gmail phải hợp lệ và chưa được tài khoản khác sử dụng.'}</small>
+  <small>${isGoogleAccount||oldEmail?'🔒 Gmail đã liên kết được giữ nguyên.':'Có thể nhập Gmail để liên kết tài khoản; Gmail phải hợp lệ và chưa được tài khoản khác sử dụng.'}</small>
   <div class="meowIdentityMsg" id="meowIdentityMsg" role="status">${oldEmail&&!isGoogleAccount?'🔒 Gmail đã liên kết nên không thể thay đổi.':''}</div>
   <button type="button" class="meowIdentitySave" id="meowIdentitySave" >Lưu thay đổi ♡</button>
  </section>`;
@@ -9939,7 +9968,7 @@ async function meowEditProfileIdentity(){
  const save=overlay.querySelector('#meowIdentitySave'),msg=overlay.querySelector('#meowIdentityMsg');
  save.onclick=async()=>{
   const newName=overlay.querySelector('#meowIdentityName').value.trim();
-  const newId=(isGoogleAccount||oldEmail)?oldId:overlay.querySelector('#meowIdentityId').value.trim();
+  const newId=isGoogleAccount?oldId:overlay.querySelector('#meowIdentityId').value.trim();
   const enteredEmail=isGoogleAccount?'':String(overlay.querySelector('#meowIdentityEmail').value||'').trim().toLowerCase();
   const newEmail=isGoogleAccount?oldEmail:(oldEmail||enteredEmail);
   if(newName.length<2){msg.textContent='Nhập tên từ 2 ký tự nha.';return}
@@ -9989,7 +10018,7 @@ async function meowEditProfileIdentity(){
     if(!emailClaim.committed)throw Error('Gmail này đã được liên kết với tài khoản khác.');
     reservedEmail=true;
    }
-   const nextRecord={...oldRecord,name:newName,displayName:newName};
+   const nextRecord={...oldRecord,id:newId,customerId:newId,name:newName,displayName:newName};
    if(!serverEmail&&newEmail){nextRecord.email=newEmail;nextRecord.gmail=newEmail}
    const updates={};
    const putMoved=async(pathOld,pathNew)=>{
@@ -10014,12 +10043,16 @@ async function meowEditProfileIdentity(){
     const oldWallet=oldWalletSnap.exists()?(oldWalletSnap.val()||{}):{};
     const newWallet=newWalletSnap.exists()?(newWalletSnap.val()||{}):{};
     const oldBalance=Number(oldWallet.balance);
+    const newBalance=Number(newWallet.balance);
     const profileBalance=Number(oldRecord.balance??oldRecord.walletBalance??oldRecord.prepaidBalance);
+    // Không để ví đích rỗng/0 ghi đè số dư cũ; cũng giữ số dư đích
+    // nếu nó lớn hơn (ví dụ lần chuyển ID trước bị dở dang).
+    const validWalletBalances=[oldBalance,newBalance].filter(v=>Number.isFinite(v)&&v>=0);
+    const safeProfileBalance=Number.isFinite(profileBalance)&&profileBalance>=0?profileBalance:0;
     const mergedWallet={
      ...newWallet,
      ...oldWallet,
-     balance:Number.isFinite(oldBalance)?oldBalance:
-      (Number.isFinite(profileBalance)?profileBalance:(Number(newWallet.balance)||0))
+     balance:validWalletBalances.length?Math.max(...validWalletBalances):safeProfileBalance
     };
     // Giữ lại các trường thống kê nếu bản ghi ví cũ chưa có.
     for(const field of ['totalIn','totalOut','createdAt','updatedAt']){
@@ -10091,7 +10124,7 @@ async function meowEditProfileIdentity(){
     Object.entries(node).forEach(([key,value])=>{
      const childPath=path+'/'+key;
      if(!value||typeof value!=='object')return;
-     if(key==='likes'){
+     if(key==='likes'&&oldSafeUid!==newSafeUid){
       const likes={...value};
       if(Object.prototype.hasOwnProperty.call(likes,oldSafeUid)){
        likes[newSafeUid]=likes[oldSafeUid];delete likes[oldSafeUid];updates[childPath]=likes;
@@ -10108,7 +10141,7 @@ async function meowEditProfileIdentity(){
 
    // Lượt cảm xúc truyện được lưu bằng chính ID người dùng làm khóa.
    const reactionsSnap=await get(ref(db,'meowStoryReactions'));
-   if(reactionsSnap.exists())reactionsSnap.forEach(storyRow=>{
+   if(newId!==oldId&&reactionsSnap.exists())reactionsSnap.forEach(storyRow=>{
     const row=storyRow.val()||{},oldKey=row[oldReactionUid]?oldReactionUid:(row[oldSafeUid]?oldSafeUid:'');
     if(oldKey){
      updates['meowStoryReactions/'+storyRow.key+'/'+newReactionUid]={...row[oldKey],uid:newId,name:newName,profileAvatar,updatedAt:Date.now()};
@@ -10137,12 +10170,14 @@ async function meowEditProfileIdentity(){
    // Di chuyển cài đặt giao diện web và dữ liệu mini game trên cloud.
    const encodedOldSettings=encodeURIComponent(oldId).replace(/\\./g,'%2E');
    const encodedNewSettings=encodeURIComponent(newId).replace(/\\./g,'%2E');
-   for(const [from,to] of [
-    ['miniMeowWebSettings/'+encodedOldSettings,'miniMeowWebSettings/'+encodedNewSettings],
-    ['users/'+oldId,'users/'+newId]
-   ]){
-    const snap=await get(ref(db,from));
-    if(snap.exists()){updates[to]=snap.val();updates[from]=null;}
+   if(newId!==oldId){
+    for(const [from,to] of [
+     ['miniMeowWebSettings/'+encodedOldSettings,'miniMeowWebSettings/'+encodedNewSettings],
+     ['users/'+oldId,'users/'+newId]
+    ]){
+     const snap=await get(ref(db,from));
+     if(snap.exists()){updates[to]=snap.val();updates[from]=null;}
+    }
    }
 
    // Đồng bộ tên/ID/avatar trong tin nhắn chat đã lưu.
@@ -10170,14 +10205,14 @@ async function meowEditProfileIdentity(){
 
    await update(ref(db),updates);
    // Chuyển cache cài đặt và avatar cục bộ sang khóa ID mới.
-   try{
+   if(newId!==oldId){try{
     const oldSettingsKey='meow_web_appearance_v2_'+oldId,newSettingsKey='meow_web_appearance_v2_'+newId;
     const localSettings=localStorage.getItem(oldSettingsKey);
     if(localSettings){localStorage.setItem(newSettingsKey,localSettings);localStorage.removeItem(oldSettingsKey);}
     const oldAvatarKey=MEOW_PROFILE_AVATAR_KEY+oldId,newAvatarKey=MEOW_PROFILE_AVATAR_KEY+newId;
     const localAvatar=localStorage.getItem(oldAvatarKey);
     if(localAvatar){localStorage.setItem(newAvatarKey,localAvatar);localStorage.removeItem(oldAvatarKey);}
-   }catch(_){}
+   }catch(_){}}
    if(typeof meowCustomerLiveUnsubscribe==='function'){try{meowCustomerLiveUnsubscribe()}catch(_){}meowCustomerLiveUnsubscribe=null}
    if(typeof meowAvatarUnsubscribe==='function'){try{meowAvatarUnsubscribe()}catch(_){}meowAvatarUnsubscribe=null}
    currentCustomer={...nextRecord,id:newId};
